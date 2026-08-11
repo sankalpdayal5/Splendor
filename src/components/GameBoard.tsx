@@ -14,6 +14,9 @@ import { BuyModal } from './BuyModal.js';
 import { OwnedCardsModal } from './OwnedCardsModal.js';
 import { LearnModeCoach } from './LearnModeCoach.js';
 import { speechAnnouncer } from '../utils/SpeechAnnouncer.js';
+import { useViewport } from '../utils/useViewport.js';
+import { Haptics } from '../utils/haptics.js';
+import { Users, Check } from 'lucide-react';
 
 interface GameBoardProps {
   gameState: GameState;
@@ -32,11 +35,13 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   onRematch,
   selfPlayerId
 }) => {
+  const viewport = useViewport();
   const activePlayer = gameState.players[gameState.currentTurnIndex];
   const isSelfTurn = !selfPlayerId || activePlayer.id === selfPlayerId;
 
   // Local staged token state
   const [selectedGems, setSelectedGems] = useState<GemColor[]>([]);
+  const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
 
   // Pending Buy Confirmation state
   const [pendingBuy, setPendingBuy] = useState<{
@@ -79,49 +84,58 @@ export const GameBoard: React.FC<GameBoardProps> = ({
     }
   });
 
-  const getCardRecommendationBadge = (tier: 1 | 2 | 3, slotIdx: number) => {
-    const recIndex = recommendations.findIndex(rec => {
-      const a = rec.action;
-      return (a.type === 'BUY_GRID' || a.type === 'RESERVE_GRID') && a.tier === tier && a.slotIdx === slotIdx;
-    });
-
-    if (recIndex !== -1) {
-      const rec = recommendations[recIndex];
-      return { rank: (recIndex + 1) as 1 | 2 | 3, color: rec.badgeColor };
+  const getCardRecommendationBadge = (tier: 1 | 2 | 3, slotIdx: number): { rank: 1 | 2 | 3; color: string } | undefined => {
+    for (let i = 0; i < recommendations.length; i++) {
+      const rec = recommendations[i];
+      if (rec.action.type === 'BUY_GRID' && rec.action.tier === tier && rec.action.slotIdx === slotIdx) {
+        return { rank: (i + 1) as 1 | 2 | 3, color: i === 0 ? '#F59E0B' : i === 1 ? '#10B981' : '#3B82F6' };
+      }
+      if (rec.action.type === 'RESERVE_GRID' && rec.action.tier === tier && rec.action.slotIdx === slotIdx) {
+        return { rank: (i + 1) as 1 | 2 | 3, color: i === 0 ? '#F59E0B' : i === 1 ? '#10B981' : '#3B82F6' };
+      }
     }
     return undefined;
   };
 
   const handleToggleGemSelection = (color: GemColor) => {
     if (!isSelfTurn) return;
+    Haptics.gemPick();
 
     setSelectedGems(prev => {
-      const count = prev.filter(c => c === color).length;
-      if (count === 2) {
-        return prev.filter(c => c !== color);
-      }
-      if (count === 1) {
-        if (prev.length === 1 && (gameState.bank[color] || 0) >= 4) {
+      // 1. Same color toggle (double pick)
+      if (prev.length === 1 && prev[0] === color) {
+        if ((gameState.bank[color] || 0) >= 4) {
           return [color, color];
+        } else {
+          speechAnnouncer.announcePolite(`Cannot take 2 ${color} gems. Need at least 4 in bank.`);
+          return [];
         }
+      }
+      if (prev.length === 2 && prev[0] === color && prev[1] === color) {
+        return [];
+      }
+
+      // 2. Distinct colors toggle
+      if (prev.includes(color)) {
         return prev.filter(c => c !== color);
       }
-      if (new Set(prev).size < 3) {
-        return [...prev, color];
+
+      if (prev.length >= 3) {
+        return [color];
       }
-      return prev;
+
+      return [...prev, color];
     });
   };
 
   const handleConfirmTakeGems = () => {
-    if (selectedGems.length === 0 || !isSelfTurn) return;
+    if (!isSelfTurn || selectedGems.length === 0) return;
+    Haptics.cardAction();
 
     if (selectedGems.length === 2 && selectedGems[0] === selectedGems[1]) {
-      const action: GameAction = { type: 'TAKE_2_SAME', color: selectedGems[0] };
-      onDispatchAction(action);
-    } else {
-      const action: GameAction = { type: 'TAKE_3_DISTINCT', colors: selectedGems };
-      onDispatchAction(action);
+      onDispatchAction({ type: 'TAKE_2_SAME', color: selectedGems[0] });
+    } else if (selectedGems.length <= 3) {
+      onDispatchAction({ type: 'TAKE_3_DISTINCT', colors: selectedGems });
     }
     setSelectedGems([]);
   };
@@ -129,37 +143,46 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   // Trigger Buy Confirmation Modal
   const handlePromptBuyGrid = (tier: 1 | 2 | 3, slotIdx: number, card: DevelopmentCard) => {
     if (!isSelfTurn) return;
+    Haptics.gemPick();
     setPendingBuy({ source: 'grid', tier, slotIdx, card });
   };
 
   const handlePromptBuyReserved = (reservedIndex: number, card: DevelopmentCard) => {
     if (!isSelfTurn) return;
+    Haptics.gemPick();
     setPendingBuy({ source: 'reserved', reservedIndex, card });
   };
 
   const handleConfirmBuy = () => {
     if (!pendingBuy) return;
+    Haptics.cardAction();
+
     if (pendingBuy.source === 'grid' && pendingBuy.tier && pendingBuy.slotIdx !== undefined) {
       onDispatchAction({ type: 'BUY_GRID', tier: pendingBuy.tier, slotIdx: pendingBuy.slotIdx });
     } else if (pendingBuy.source === 'reserved' && pendingBuy.reservedIndex !== undefined) {
       onDispatchAction({ type: 'BUY_RESERVED', reservedIndex: pendingBuy.reservedIndex });
     }
     setPendingBuy(null);
+    setTargetReservedPlayerId(null);
   };
 
   // Trigger Reserve Confirmation Modal
   const handlePromptReserveGrid = (tier: 1 | 2 | 3, slotIdx: number, card: DevelopmentCard | null) => {
     if (!isSelfTurn || activePlayer.reservedCards.length >= 3) return;
+    Haptics.gemPick();
     setPendingReserve({ type: 'grid', tier, slotIdx, card });
   };
 
   const handlePromptReserveDeck = (tier: 1 | 2 | 3) => {
     if (!isSelfTurn || activePlayer.reservedCards.length >= 3) return;
+    Haptics.gemPick();
     setPendingReserve({ type: 'deck', tier });
   };
 
   const handleConfirmReserve = () => {
     if (!pendingReserve) return;
+    Haptics.cardAction();
+
     if (pendingReserve.type === 'grid' && pendingReserve.slotIdx !== undefined) {
       onDispatchAction({ type: 'RESERVE_GRID', tier: pendingReserve.tier, slotIdx: pendingReserve.slotIdx });
     } else if (pendingReserve.type === 'deck') {
@@ -172,7 +195,7 @@ export const GameBoard: React.FC<GameBoardProps> = ({
   const ownedModalPlayer = gameState.players.find(p => p.id === targetOwnedPlayerId);
 
   return (
-    <div className="game-container">
+    <div className={`game-container ${viewport.isMobile ? 'mobile-mode' : ''} ${viewport.isLandscape ? 'landscape-mode' : ''}`}>
       {/* LEFT COLUMN: Gem Bank Supply */}
       <GemBank
         bank={gameState.bank}
@@ -189,7 +212,10 @@ export const GameBoard: React.FC<GameBoardProps> = ({
           <LearnModeCoach
             gameState={gameState}
             isSelfTurn={isSelfTurn}
-            onExecuteAction={(action) => onDispatchAction(action)}
+            onExecuteAction={(action) => {
+              Haptics.cardAction();
+              onDispatchAction(action);
+            }}
           />
         )}
 
@@ -247,61 +273,93 @@ export const GameBoard: React.FC<GameBoardProps> = ({
           })}
         </section>
 
-        {/* Action Drawer Footer */}
-        <div className="glass-panel action-drawer">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <span style={{ fontSize: '0.9rem', color: '#94A3B8' }}>Staged Gems:</span>
-            {selectedGems.length === 0 ? (
-              <span style={{ fontSize: '0.85rem', color: '#64748B', fontStyle: 'italic' }}>Click gems in bank to select</span>
-            ) : (
-              <div style={{ display: 'flex', gap: '6px' }}>
-                {selectedGems.map((c, i) => (
-                  <span key={i} style={{ background: 'rgba(245,158,11,0.2)', border: '1px solid #F59E0B', color: '#F59E0B', padding: '2px 8px', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 'bold' }}>
-                    {c}
+        {/* Desktop Action Drawer Footer */}
+        {!viewport.isMobile && (
+          <footer className="action-drawer glass-panel" aria-label="Staged Gems Controls">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <span style={{ fontSize: '0.85rem', color: '#94A3B8' }}>Staged Gems:</span>
+              {selectedGems.length === 0 ? (
+                <span style={{ fontSize: '0.85rem', color: '#64748B', fontStyle: 'italic' }}>
+                  Tap gems from supply to select (3 distinct or 2 same)...
+                </span>
+              ) : (
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  {selectedGems.map((col, i) => (
+                    <span key={i} className={`gem-chip bg-${col}`} style={{ width: '32px', height: '32px', fontSize: '0.8rem' }}>
+                      {col[0].toUpperCase()}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px' }}>
+              {selectedGems.length > 0 && (
+                <button className="btn-secondary" style={{ padding: '6px 12px', minHeight: '36px' }} onClick={() => setSelectedGems([])}>
+                  Clear
+                </button>
+              )}
+              <button
+                className="btn-primary"
+                disabled={!isSelfTurn || selectedGems.length === 0}
+                onClick={handleConfirmTakeGems}
+              >
+                Confirm Take Gems
+              </button>
+            </div>
+          </footer>
+        )}
+      </main>
+
+      {/* RIGHT COLUMN: Player HUD Panels */}
+      <aside className={`players-column ${mobileDrawerOpen ? 'mobile-open' : ''}`}>
+        {gameState.players.map((p, idx) => (
+          <PlayerPanel
+            key={p.id}
+            player={p}
+            isActiveTurn={idx === gameState.currentTurnIndex}
+            isSelf={!selfPlayerId || p.id === selfPlayerId}
+            onOpenReservedModal={() => setTargetReservedPlayerId(p.id)}
+            onOpenOwnedModal={() => setTargetOwnedPlayerId(p.id)}
+          />
+        ))}
+      </aside>
+
+      {/* Mobile Sticky Bottom Command Bar */}
+      {viewport.isMobile && (
+        <div className="mobile-bottom-bar">
+          <button
+            className="btn-secondary"
+            style={{ padding: '6px 12px', minHeight: '44px', fontSize: '0.85rem' }}
+            onClick={() => setMobileDrawerOpen(!mobileDrawerOpen)}
+          >
+            <Users size={18} /> Players ({gameState.players.length})
+          </button>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            {selectedGems.length > 0 && (
+              <div style={{ display: 'flex', gap: '4px' }}>
+                {selectedGems.map((col, i) => (
+                  <span key={i} className={`gem-chip bg-${col}`} style={{ width: '28px', height: '28px', fontSize: '0.75rem' }}>
+                    {col[0].toUpperCase()}
                   </span>
                 ))}
               </div>
             )}
-          </div>
 
-          <div style={{ display: 'flex', gap: '10px' }}>
-            {selectedGems.length > 0 && (
-              <button className="btn-secondary" onClick={() => setSelectedGems([])}>
-                Clear
-              </button>
-            )}
             <button
               className="btn-primary"
-              disabled={selectedGems.length === 0 || !isSelfTurn}
+              style={{ minHeight: '44px', padding: '6px 16px', fontSize: '0.85rem' }}
+              disabled={!isSelfTurn || selectedGems.length === 0}
               onClick={handleConfirmTakeGems}
             >
-              Confirm Take Gems
+              <Check size={16} /> Confirm Gems
             </button>
           </div>
         </div>
-      </main>
+      )}
 
-      {/* RIGHT COLUMN: Player HUD Panels */}
-      <aside className="players-column">
-        {gameState.players.map((player, index) => {
-          const playerLogs = (gameState.moveHistory || []).filter(l => l.playerId === player.id);
-          const lastActionLog = playerLogs.length > 0 ? playerLogs[playerLogs.length - 1] : null;
-
-          return (
-            <PlayerPanel
-              key={player.id}
-              player={player}
-              isActiveTurn={index === gameState.currentTurnIndex}
-              isSelf={!selfPlayerId || player.id === selfPlayerId}
-              lastAction={lastActionLog ? lastActionLog.description : undefined}
-              onOpenReservedModal={() => setTargetReservedPlayerId(player.id)}
-              onOpenOwnedModal={() => setTargetOwnedPlayerId(player.id)}
-            />
-          );
-        })}
-      </aside>
-
-      {/* Confirmation Modal Before Buying */}
+      {/* Buy Confirmation Modal */}
       <BuyModal
         pendingBuy={pendingBuy}
         player={activePlayer}
@@ -310,31 +368,28 @@ export const GameBoard: React.FC<GameBoardProps> = ({
         onCancel={() => setPendingBuy(null)}
       />
 
-      {/* Confirmation Modal Before Reserving */}
+      {/* Reserve Confirmation Modal */}
       <ReserveModal
         pendingReserve={pendingReserve}
-        goldAvailable={gameState.bank.gold > 0}
+        goldAvailable={(gameState.bank.gold || 0) > 0}
         colorblindMode={colorblindMode}
         onConfirm={handleConfirmReserve}
         onCancel={() => setPendingReserve(null)}
       />
 
-      {/* View & Buy Reserved Cards Modal */}
-      {reservedModalPlayer && (
+      {/* Reserved Cards Drawer Modal */}
+      {targetReservedPlayerId && reservedModalPlayer && (
         <ReservedCardsModal
           player={reservedModalPlayer}
-          isActiveTurn={gameState.players[gameState.currentTurnIndex].id === reservedModalPlayer.id && isSelfTurn}
+          isActiveTurn={isSelfTurn}
           colorblindMode={colorblindMode}
-          onBuyReservedCard={(resIdx) => {
-            const card = reservedModalPlayer.reservedCards[resIdx];
-            if (card) handlePromptBuyReserved(resIdx, card);
-          }}
+          onBuyReservedCard={(idx) => handlePromptBuyReserved(idx, reservedModalPlayer.reservedCards[idx])}
           onClose={() => setTargetReservedPlayerId(null)}
         />
       )}
 
-      {/* View Owned Cards Collection Modal */}
-      {ownedModalPlayer && (
+      {/* Owned Cards Collection Drawer Modal */}
+      {targetOwnedPlayerId && ownedModalPlayer && (
         <OwnedCardsModal
           player={ownedModalPlayer}
           colorblindMode={colorblindMode}
@@ -342,16 +397,30 @@ export const GameBoard: React.FC<GameBoardProps> = ({
         />
       )}
 
-      {/* Action Modals (Discard Tokens / Select Noble) */}
-      <ActionModal
-        gameState={gameState}
-        onConfirmDiscard={(tokens) => onDispatchAction({ type: 'DISCARD_TOKENS', tokens })}
-        onSelectNoble={(nobleId) => onDispatchAction({ type: 'SELECT_NOBLE', nobleId })}
-      />
+      {/* Token Over-Limit / Noble Selection Action Modal */}
+      {isSelfTurn && (gameState.phase === 'PHASE_DISCARD' || gameState.phase === 'PHASE_NOBLE_SELECTION') && (
+        <ActionModal
+          gameState={gameState}
+          onConfirmDiscard={(tokensToDiscard) => {
+            Haptics.cardAction();
+            onDispatchAction({ type: 'DISCARD_TOKENS', tokens: tokensToDiscard });
+          }}
+          onSelectNoble={(nobleId) => {
+            Haptics.cardAction();
+            onDispatchAction({ type: 'SELECT_NOBLE', nobleId });
+          }}
+        />
+      )}
 
-      {/* Victory Summary Screen */}
-      {gameState.phase === 'FINISHED' && (
-        <VictoryModal gameState={gameState} onRematch={onRematch} />
+      {/* Victory Modal */}
+      {gameState.winnerIds && gameState.winnerIds.length > 0 && (
+        <VictoryModal
+          gameState={gameState}
+          onRematch={() => {
+            Haptics.victoryFanfare();
+            onRematch();
+          }}
+        />
       )}
     </div>
   );
